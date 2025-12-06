@@ -13,4 +13,3 @@ __pycache__/
 
 # Ignore data files if they are large (optional)
 *.csv
-*.pkl
