@@ -15,27 +15,34 @@ load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key:
-    # This will both show in the app and stop the code
     st.error("OPENAI_API_KEY is not set. Check your .env file in this folder.")
     raise RuntimeError("OPENAI_API_KEY is not set")
 
 # Set up OpenAI client using the key
 client = OpenAI(api_key=api_key)
 
-# Load ML model
+# Load ML model (this is a pipeline with preprocessing!)
 model = joblib.load('fraud_detection_model2.pkl')
 
 st.title("Credit Card Fraud Detection")
 st.markdown("Enter the transaction details to predict if it's fraudulent or not.")
 st.divider()
 
-# ---- Input fields (your columns) ----
-transaction_type = st.selectbox("Transaction Type", ["PAYMENT", "TRANSFER", "CASH OUT", "DEPOSIT"])
+# ---- Input fields ----
+# FIXED: Match exact training data values
+transaction_type = st.selectbox(
+    "Transaction Type", 
+    ["PAYMENT", "TRANSFER", "CASH_OUT", "DEPOSIT", "DEBIT"]
+)
+
 amount = st.number_input("Transaction Amount", min_value=0.0, value=1000.0)
 oldbalanceOrg = st.number_input("Old Balance of Origin Account", min_value=0.0, value=10000.0)
 newbalanceOrig = st.number_input("New Balance of Origin Account", min_value=0.0, value=9000.0)
 oldbalanceDest = st.number_input("Old Balance of Destination Account", min_value=0.0, value=0.0)
 newbalanceDest = st.number_input("New Balance of Destination Account", min_value=0.0, value=0.0)
+
+# Fixed fraud detection threshold (not shown in UI)
+fraud_threshold = 0.10
 
 
 def generate_ai_explanation(features: dict, prediction: int, fraud_prob: float) -> str:
@@ -63,8 +70,8 @@ def generate_ai_explanation(features: dict, prediction: int, fraud_prob: float) 
         "predicted as potentially fraudulent or legitimate.\n\n"
         "Rules:\n"
         "- Always mention that this is a prediction, not a guarantee.\n"
-        "- Focus on the main risk factors only (2–4 reasons).\n"
-        "- Be concise: 2–5 sentences.\n"
+        "- Focus on the main risk factors only (2-4 reasons).\n"
+        "- Be concise: 2-5 sentences.\n"
         "- Use simple language.\n"
         "- Do not invent data that is not in the JSON.\n"
     )
@@ -77,7 +84,7 @@ def generate_ai_explanation(features: dict, prediction: int, fraud_prob: float) 
 
     try:
         completion = client.chat.completions.create(
-            model="gpt-4.1-mini",  # or another chat model you prefer :contentReference[oaicite:0]{index=0}
+            model="gpt-4o-mini",  # Fixed model name
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
@@ -87,14 +94,13 @@ def generate_ai_explanation(features: dict, prediction: int, fraud_prob: float) 
         return completion.choices[0].message.content.strip()
 
     except Exception as e:
-        # Fallback if API call fails
         return f"(Could not generate AI explanation: {e})"
 
 
 if st.button("Predict"):
-    # Create input row for the ML model
+    # FIXED: Create input with EXACT same columns and order as training
     input_data = pd.DataFrame([{
-        'type': transaction_type,
+        'type': transaction_type,  # Must match training exactly (CASH_OUT not "CASH OUT")
         'amount': amount,
         'oldbalanceOrg': oldbalanceOrg,
         'newbalanceOrig': newbalanceOrig,
@@ -102,22 +108,21 @@ if st.button("Predict"):
         'newbalanceDest': newbalanceDest
     }])
 
-    # Model prediction
-    prediction = int(model.predict(input_data)[0])
+    # Get fraud probability FIRST (before threshold decision)
+    proba = float(model.predict_proba(input_data)[0][1])  # prob of class "1" = fraud
+    
+    # FIXED: Use custom threshold instead of default 0.5
+    prediction = 1 if proba >= fraud_threshold else 0
 
-    # Fraud probability (assumes sklearn-style model with predict_proba)
-    try:
-        proba = float(model.predict_proba(input_data)[0][1])  # prob of class "1" = fraud
-    except AttributeError:
-        # If your model doesn't support predict_proba, fall back to 0/1
-        proba = 1.0 if prediction == 1 else 0.0
-
-    st.subheader(f"Model Prediction: {prediction} ({'Fraud' if prediction == 1 else 'Legit'})")
+    # Display results
+    st.subheader("Prediction Results")
+    
+    st.metric("Fraud Probability", f"{proba:.1%}")
 
     if prediction == 1:
-        st.error(f"The transaction is predicted to be Fraudulent (probability ~ {proba:.2%}).")
+        st.error(f"⚠️ **FRAUD ALERT**: This transaction is predicted to be Fraudulent")
     else:
-        st.success(f"The transaction is predicted to be Legitimate (probability ~ {proba:.2%}).")
+        st.success(f"✅ **LEGITIMATE**: This transaction appears to be Legitimate")
 
     # Build a dict of the raw feature values for the AI explanation
     feature_dict = {
@@ -127,9 +132,17 @@ if st.button("Predict"):
         "newbalanceOrig": newbalanceOrig,
         "oldbalanceDest": oldbalanceDest,
         "newbalanceDest": newbalanceDest
-        # If later you add 'step', include it here as well
     }
 
     st.markdown("### AI Explanation")
-    explanation = generate_ai_explanation(feature_dict, prediction, proba)
+    with st.spinner("Generating explanation..."):
+        explanation = generate_ai_explanation(feature_dict, prediction, proba)
     st.info(explanation)
+    
+    # Show debugging info in expander
+    with st.expander("🔍 Technical Details"):
+        st.write("**Input DataFrame:**")
+        st.dataframe(input_data)
+        st.write(f"**Raw Prediction:** {prediction}")
+        st.write(f"**Fraud Probability:** {proba:.4f}")
+        st.write(f"**Applied Threshold:** {fraud_threshold}")
